@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+
+# Streamlit
+.streamlit/
+
+# Data & Cache
+data_cache/
+*.csv
+*.xlsx
+!dummy_sales.csv  # Keep sample data if needed
+
+# OS
+.DS_Store
+Thumbs.db
