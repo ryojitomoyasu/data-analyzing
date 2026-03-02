@@ -3,7 +3,18 @@ import pandas as pd
 import plotly.express as px
 import os
 import io
-from dotenv import load_dotenv
+
+
+# ローカル環境でだけ .env を読む
+if os.path.exists(".env"):
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    st.error("API_KEY is missing. Please set it in Secrets / environment variables.")
+    st.stop()
+
 from data_processor import clean_data, calculate_kpis, infer_industry, calculate_abc_analysis
 from ai_engine import AIEngine
 

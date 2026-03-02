@@ -219,7 +219,15 @@ translations = {
         "warn_ai_api_needed": "⚠️ AI機能を利用するには、Google API Keyの設定が必要です。",
         "success_ai_connected": "✅ 接続成功！ AI機能が有効化されました。",
         "error_ai_connect": "接続エラー: ",
-        "ai_chat_placeholder": "このデータについて質問する... (例: なぜ売上が伸び悩んでいる？来月の対策は？)"
+        "ai_chat_placeholder": "このデータについて質問する... (例: なぜ売上が伸び悩んでいる？来月の対策は？)",
+        "cust_monthly_trend_title": "カテゴリー別 月次売上推移",
+        "yoy_summary_table_title": "前年対比 実績集計表",
+        "col_sales_suffix": "実績",
+        "col_diff": "前年差異",
+        "col_yoy": "前年比 (%)",
+        "store_yoy_title": "店舗別 実績対比",
+        "store_monthly_title": "店舗別 月次売上集計",
+        "select_store_monthly": "詳細を確認する店舗を選択"
     },
     "English": {
         "app_title": "BizStrategy",
@@ -345,7 +353,15 @@ translations = {
         "warn_ai_api_needed": "⚠️ Google API Key required for AI features.",
         "success_ai_connected": "✅ AI Features Connected!",
         "error_ai_connect": "Connection Error: ",
-        "ai_chat_placeholder": "Ask about this data... (e.g. Why is sales flat? Action plan?)"
+        "ai_chat_placeholder": "Ask about this data... (e.g. Why is sales flat? Action plan?)",
+        "cust_monthly_trend_title": "Category Monthly Sales Trend",
+        "yoy_summary_table_title": "YoY Performance Summary",
+        "col_sales_suffix": " Sales",
+        "col_diff": "Diff",
+        "col_yoy": "YoY (%)",
+        "store_yoy_title": "Store YoY Comparison",
+        "store_monthly_title": "Store Monthly Breakdown",
+        "select_store_monthly": "Select Store (Month Detail)"
     }
 }
 
@@ -1842,11 +1858,14 @@ if brand_col and year_col and month_col and val_col_name:
                      top_cats_trend = df_curr_only.groupby(category_col)[val_col_name].sum().sort_values(ascending=False).head(5).index.tolist()
                      all_cats_sorted = df_curr_only.groupby(category_col)[val_col_name].sum().sort_values(ascending=False).index.tolist()
                      
+                     # Initialize session_state if not present
+                     if "cat_trend_viz_key" not in st.session_state:
+                         st.session_state.cat_trend_viz_key = top_cats_trend
+                     
                      st.caption(t['select_category_prompt'])
                      selected_cats_trend = st.multiselect(
                          t['select_category_label'],
                          options=all_cats_sorted,
-                         default=top_cats_trend,
                          key="cat_trend_viz_key"
                      )
                      
@@ -1872,16 +1891,77 @@ if brand_col and year_col and month_col and val_col_name:
                          
                          # 2. Line Chart Data (YoY % Calculation)
                          # Need Total Sales per Month for Current and Previous Year
-                         # [Fix] ensure sorting by MonthNum to prevent zigzag line
-                         df_trend_totals = trend_agg.groupby([month_col, 'MonthNum', year_col])[val_col_name].sum().unstack(fill_value=0).reset_index()
+                         # [Fix] Calculate directly from filtered df_trend_viz to ensure consistency
+                         grp_cols_tot = [month_col, year_col]
+                         if 'MonthNum' in df_trend_viz.columns: grp_cols_tot.append('MonthNum')
+                         
+                         df_trend_totals = df_trend_viz.groupby(grp_cols_tot)[val_col_name].sum().unstack(level=year_col, fill_value=0).reset_index()
+                         
                          if 'MonthNum' in df_trend_totals.columns:
                              df_trend_totals = df_trend_totals.sort_values('MonthNum')
                          
                          # Correctly handle columns if unstack resulted in year columns
-                         if str(sec_curr_year) in df_trend_totals.columns and str(sec_prev_year) in df_trend_totals.columns:
-                             df_trend_totals['YoY %'] = df_trend_totals.apply(lambda r: ((r[str(sec_curr_year)] - r[str(sec_prev_year)]) / r[str(sec_prev_year)] * 100) if r[str(sec_prev_year)] != 0 else np.nan, axis=1)
-                         else:
-                             df_trend_totals['YoY %'] = np.nan
+                         # Ensure we use string keys for column access
+                         s_curr = str(sec_curr_year)
+                         s_prev = str(sec_prev_year)
+                         
+                         # Ensure columns exist (fill 0 if missing)
+                         # Explicitly check string columns
+                         cols_str_tot = {str(c): c for c in df_trend_totals.columns}
+                         
+                         col_curr_tot = cols_str_tot.get(s_curr)
+                         col_prev_tot = cols_str_tot.get(s_prev)
+                         
+                         if not col_curr_tot:
+                              df_trend_totals[s_curr] = 0
+                              col_curr_tot = s_curr
+                         if not col_prev_tot:
+                              df_trend_totals[s_prev] = 0
+                              col_prev_tot = s_prev
+                              
+                         df_trend_totals['YoY %'] = df_trend_totals.apply(lambda r: ((r[col_curr_tot] - r[col_prev_tot]) / r[col_prev_tot] * 100) if r[col_prev_tot] != 0 else (0 if r[col_curr_tot] == 0 else 100), axis=1)
+                         
+                         # --- [NEW] Summary Table Logic (Category) ---
+                         # Prepare data for table
+                         df_cat_summary = df_trend_totals[[month_col, col_curr_tot, col_prev_tot, 'YoY %']].copy()
+                         df_cat_summary['Diff'] = df_cat_summary[col_curr_tot] - df_cat_summary[col_prev_tot]
+                         
+                         # Ensure sorted by MonthNum if available
+                         if 'MonthNum' in df_trend_totals.columns:
+                             df_cat_summary['MonthNum'] = df_trend_totals['MonthNum']
+                             df_cat_summary = df_cat_summary.sort_values('MonthNum')
+                         
+                         # Restore sorting if explicit sort list exists
+                         if sorted_months_cat:
+                             df_cat_summary[month_col] = pd.Categorical(df_cat_summary[month_col], categories=sorted_months_cat, ordered=True)
+                             df_cat_summary = df_cat_summary.sort_values(month_col)
+
+                         # Transpose: Rows = Metrics, Cols = Months
+                         df_cat_summary_t = df_cat_summary.set_index(month_col)[[col_curr_tot, col_prev_tot, 'Diff', 'YoY %']].T
+                         
+                         # Add Total Column
+                         cat_total_curr = df_cat_summary[col_curr_tot].sum()
+                         cat_total_prev = df_cat_summary[col_prev_tot].sum()
+                         cat_total_diff = cat_total_curr - cat_total_prev
+                         cat_total_yoy = (cat_total_diff / cat_total_prev * 100) if cat_total_prev != 0 else 0
+                         
+                         df_cat_summary_t['Total'] = [cat_total_curr, cat_total_prev, cat_total_diff, cat_total_yoy]
+                         
+                         # Rename Index
+                         df_cat_summary_t.index = [f"{sec_curr_year}実績", f"{sec_prev_year}実績", "前年差異", "前年比 (%)"]
+                         
+                         # Display Table
+                         st.markdown("##### 前年対比 実績集計表")
+                         
+                         # Formatting function (reuse style logic if possible, or redefine)
+                         def style_cat_summary(styler):
+                             styler.format("{:,.0f}", subset=pd.IndexSlice[[f"{sec_curr_year}実績", f"{sec_prev_year}実績", "前年差異"], :])
+                             styler.format("{:,.1f}%", subset=pd.IndexSlice[["前年比 (%)"], :])
+                             styler.applymap(lambda v: 'color: red;' if v < 0 else 'color: blue;', subset=pd.IndexSlice[["前年差異", "前年比 (%)"], :])
+                             return styler
+
+                         st.dataframe(df_cat_summary_t.style.pipe(style_cat_summary), use_container_width=True)
+                         # --- End Summary Table ---
                              
                          # Create Figure
                          fig_trend = go.Figure()
@@ -1951,55 +2031,179 @@ if brand_col and year_col and month_col and val_col_name:
                  # --- [NEW] Product Monthly Trend (Requested) ---
                  st.markdown(f"**{t['product_trend_title']} - {branch_label}**")
                  
-                 if item_col and item_col != "(なし)":
-                     # Filter by Current Year
-                     df_prod_trend_base = df_cat_base[df_cat_base[year_col] == sec_curr_year]
-                     
-                     if not df_prod_trend_base.empty:
-                         # 1. Calculate Top Products for Default Selection
-                         top_prods = df_prod_trend_base.groupby(item_col)[val_col_name].sum().sort_values(ascending=False).head(5).index.tolist()
-                         all_prods_sorted = df_prod_trend_base.groupby(item_col)[val_col_name].sum().sort_values(ascending=False).index.tolist()
+                 if item_col:
+                         # 2. Filter for BOTH Years (Current & Previous) to allow YoY calc
+                         # Note: Top 5 selection should still be based on Current Year Sales
+                         df_prod_trend_viz = df_cat_base[df_cat_base[year_col].isin([sec_curr_year, sec_prev_year])]
                          
-                         st.caption(t['select_product_prompt'])
-                         
-                         # Multiselect
-                         selected_prods_trend = st.multiselect(
-                             t['select_product_label'],
-                             options=all_prods_sorted,
-                             default=top_prods,
-                             key="prod_trend_viz_key"
-                         )
-                         
-                         if selected_prods_trend:
-                             df_prod_viz = df_prod_trend_base[df_prod_trend_base[item_col].isin(selected_prods_trend)]
+                         if not df_prod_trend_viz.empty:
+                             # Calculate Top Products based on CURRENT YEAR sales
+                             df_prod_curr = df_prod_trend_viz[df_prod_trend_viz[year_col] == sec_curr_year]
                              
-                             # Group by Month/Item
-                             grp_cols_item = [month_col, item_col]
-                             if 'MonthNum' in df_prod_viz.columns: grp_cols_item.append('MonthNum')
-                             
-                             prod_trend_agg = df_prod_viz.groupby(grp_cols_item)[val_col_name].sum().reset_index()
-                             if 'MonthNum' in prod_trend_agg.columns: prod_trend_agg = prod_trend_agg.sort_values('MonthNum')
-                             
-                             # Explicitly define order
-                             sorted_months_prod = prod_trend_agg[month_col].unique().tolist()
-                             
-                             fig_prod_trend = px.line(
-                                 prod_trend_agg, 
-                                 x=month_col, 
-                                 y=val_col_name, 
-                                 color=item_col, 
-                                 markers=True,
-                                 title=f"Product Monthly Sales Trend ({sec_curr_year})",
-                                 template="plotly_white",
-                                 category_orders={month_col: sorted_months_prod}
-                             )
-                             # Move Legend to right for clarity if many items
-                             fig_prod_trend.update_layout(legend_title_text='Item')
-                             st.plotly_chart(fig_prod_trend, use_container_width=True)
+                             if not df_prod_curr.empty:
+                                 top_prods = df_prod_curr.groupby(item_col)[val_col_name].sum().sort_values(ascending=False).head(5).index.tolist()
+                                 all_prods_sorted = df_prod_curr.groupby(item_col)[val_col_name].sum().sort_values(ascending=False).index.tolist()
+                                 
+                                 # Initialize session_state if not present
+                                 if "prod_trend_viz_key" not in st.session_state:
+                                     st.session_state.prod_trend_viz_key = top_prods
+
+                                 st.caption(t['select_product_prompt'])
+                                 
+                                 # Multiselect
+                                 selected_prods_trend = st.multiselect(
+                                     t['select_product_label'],
+                                     options=all_prods_sorted,
+                                     key="prod_trend_viz_key"
+                                 )
+                                 
+                                 if selected_prods_trend:
+                                     # Filter main df for selected products
+                                     df_prod_sel = df_prod_trend_viz[df_prod_trend_viz[item_col].isin(selected_prods_trend)].copy()
+                                     
+                                     # Ensure Year is String
+                                     df_prod_sel[year_col] = df_prod_sel[year_col].astype(str)
+                                     
+                                     # --- Stacked Bar (Curr) + Line (Prev) Logic ---
+                                     
+                                     # 1. Prepare Data for Current Year (Stacked Bars by Item)
+                                     # Filter for Current Year and Selected Products
+                                     df_prod_curr_items = df_prod_sel[df_prod_sel[year_col] == str(sec_curr_year)]
+                                     
+                                     # Group by Month and Item for Stacked Bars
+                                     grp_cols_curr = [month_col, item_col]
+                                     if 'MonthNum' in df_prod_curr_items.columns: grp_cols_curr.append('MonthNum')
+                                     
+                                     prod_curr_agg = df_prod_curr_items.groupby(grp_cols_curr)[val_col_name].sum().reset_index()
+                                     if 'MonthNum' in prod_curr_agg.columns: prod_curr_agg = prod_curr_agg.sort_values('MonthNum')
+                                     
+                                     sorted_months_curr = prod_curr_agg.sort_values('MonthNum' if 'MonthNum' in prod_curr_agg.columns else month_col)[month_col].unique().tolist()
+
+                                     # 2. Prepare Data for Previous Year (Total Line)
+                                     # Filter for Previous Year and Selected Products
+                                     df_prod_prev_total = df_prod_sel[df_prod_sel[year_col] == str(sec_prev_year)]
+                                     
+                                     # Group by Month only (Total)
+                                     grp_cols_prev = [month_col]
+                                     if 'MonthNum' in df_prod_prev_total.columns: grp_cols_prev.append('MonthNum')
+                                     
+                                     prod_prev_agg = df_prod_prev_total.groupby(grp_cols_prev)[val_col_name].sum().reset_index()
+                                     if 'MonthNum' in prod_prev_agg.columns: prod_prev_agg = prod_prev_agg.sort_values('MonthNum')
+                                     
+                                     # --- [NEW] Summary Table Logic ---
+                                     # Aggregate Current Year by Month (Total of selected items)
+                                     prod_curr_total_agg = prod_curr_agg.groupby(month_col, as_index=False)[val_col_name].sum()
+                                     if 'MonthNum' in prod_curr_agg.columns:
+                                         # Merge MonthNum back for sorting
+                                         month_order = prod_curr_agg[[month_col, 'MonthNum']].drop_duplicates()
+                                         prod_curr_total_agg = prod_curr_total_agg.merge(month_order, on=month_col, how='left').sort_values('MonthNum')
+                                     
+                                     # Rename val cols for merge
+                                     curr_view = prod_curr_total_agg[[month_col, val_col_name]].rename(columns={val_col_name: 'Current'})
+                                     prev_view = prod_prev_agg[[month_col, val_col_name]].rename(columns={val_col_name: 'Previous'})
+                                     
+                                     # Merge Current and Previous
+                                     df_summary = pd.merge(curr_view, prev_view, on=month_col, how='outer').fillna(0)
+                                     
+                                     # Restore sorting if possible
+                                     if sorted_months_curr:
+                                         df_summary[month_col] = pd.Categorical(df_summary[month_col], categories=sorted_months_curr, ordered=True)
+                                         df_summary = df_summary.sort_values(month_col)
+                                     
+                                     # Calculate Metrics
+                                     df_summary['Diff'] = df_summary['Current'] - df_summary['Previous']
+                                     df_summary['YoY %'] = df_summary.apply(lambda r: ((r['Current'] - r['Previous']) / r['Previous'] * 100) if r['Previous'] != 0 else (0 if r['Current'] == 0 else 100), axis=1)
+                                     
+                                     # Transpose for Display (Rows = Metrics, Cols = Months)
+                                     df_summary_t = df_summary.set_index(month_col).T
+                                     
+                                     # Add Total Column (Sum for Diff/Val, Calc for %)
+                                     total_curr = df_summary['Current'].sum()
+                                     total_prev = df_summary['Previous'].sum()
+                                     total_diff = total_curr - total_prev
+                                     total_yoy = (total_diff / total_prev * 100) if total_prev != 0 else 0
+                                     
+                                     df_summary_t['Total'] = [total_curr, total_prev, total_diff, total_yoy]
+                                     
+                                     # Rename Index for display
+                                     df_summary_t.index = [f"{sec_curr_year}実績", f"{sec_prev_year}実績", "前年差異", "前年比 (%)"]
+                                     
+                                     # Display Table
+                                     st.markdown("##### 前年対比 実績集計表")
+                                     
+                                     # Formatting
+                                     def style_summary(styler):
+                                         styler.format("{:,.0f}", subset=pd.IndexSlice[[f"{sec_curr_year}実績", f"{sec_prev_year}実績", "前年差異"], :])
+                                         styler.format("{:,.1f}%", subset=pd.IndexSlice[["前年比 (%)"], :])
+                                         # Color Diff and YoY%
+                                         styler.applymap(lambda v: 'color: red;' if v < 0 else 'color: blue;', subset=pd.IndexSlice[["前年差異", "前年比 (%)"], :])
+                                         return styler
+
+                                     st.dataframe(df_summary_t.style.pipe(style_summary), use_container_width=True)
+                                     
+                                     # --- End Summary Table ---
+                                     
+                                     fig_prod = go.Figure()
+                                     
+                                     # Trace 1: Stacked Bars for Current Year (Loop through items)
+                                     items_in_curr = prod_curr_agg[item_col].unique()
+                                     for item in items_in_curr:
+                                         item_data = prod_curr_agg[prod_curr_agg[item_col] == item]
+                                         fig_prod.add_trace(
+                                             go.Bar(
+                                                 x=item_data[month_col],
+                                                 y=item_data[val_col_name],
+                                                 name=str(item),
+                                                 texttemplate='%{y:.2s}',
+                                                 textposition='auto',
+                                                 # Let Plotly handle colors automatically for items
+                                             )
+                                         )
+                                         
+                                     # Trace 2: Line for Previous Year Total
+                                     fig_prod.add_trace(
+                                         go.Scatter(
+                                             x=prod_prev_agg[month_col],
+                                             y=prod_prev_agg[val_col_name],
+                                             name=f"{sec_prev_year} Total (Selected)",
+                                             mode='lines+markers+text', # Add text
+                                             text=prod_prev_agg[val_col_name],
+                                             texttemplate='%{text:.2s}',
+                                             textposition='top center',
+                                             line=dict(color='gray', width=3, dash='dash'),
+                                             marker=dict(size=8)
+                                         )
+                                     )
+                                     
+                                     # Layout
+                                     fig_prod.update_layout(
+                                         title=f"{t['product_trend_title']} ({sec_curr_year} Stacked vs {sec_prev_year} Total)",
+                                         yaxis=dict(title=t['label_sales'], showgrid=True),
+                                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                         barmode='stack', # Stacked bars
+                                         template="plotly_white",
+                                         xaxis=dict(categoryorder='array', categoryarray=sorted_months_curr if sorted_months_curr else None)
+                                     )
+                                     
+                                     st.plotly_chart(fig_prod, use_container_width=True, key=f"prod_trend_{str(selected_prods_trend)}")
+                                     
+                                 else:
+                                     st.info("商品を選択してください。")
+                                     
+                                 # [DEBUG]
+                                 with st.expander("Debug Info (Product Trend)"):
+                                     st.write("Selected Products:", selected_prods_trend)
+                                     if 'prod_prev_agg' in locals():
+                                          st.write(f"Line Data ({sec_prev_year}):", prod_prev_agg[[month_col, val_col_name]].to_dict('records'))
+                                     if 'prod_curr_agg' in locals():
+                                          st.write(f"Bar Data ({sec_curr_year}):", prod_curr_agg.head())
+                                     
+
+                                         
+                             else:
+                                 st.info(f"{sec_curr_year}年度の商品データがありません。")
                          else:
-                             st.info("商品を選択してください。")
-                     else:
-                         st.info(f"{sec_curr_year}年度の商品データがありません。")
+                             st.info(f"データがありません。")
                  else:
                      st.warning("⚠️ 商品（Item）列が設定されていません。")
 
@@ -2053,9 +2257,9 @@ if brand_col and year_col and month_col and val_col_name:
         # Filter out rows where BOTH years are 0
         df_chain_comp = df_chain_comp[(df_chain_comp[sec_curr_year] != 0) | (df_chain_comp[sec_prev_year] != 0)]
         
-        # Calculate metrics
+        # Calculate metrics (Growth Rate)
         df_chain_comp['vs LY (%)'] = df_chain_comp.apply(
-            lambda row: (row[sec_curr_year] / row[sec_prev_year] * 100) if row[sec_prev_year] != 0 else (0 if row[sec_curr_year] == 0 else 100), 
+            lambda row: ((row[sec_curr_year] - row[sec_prev_year]) / row[sec_prev_year] * 100) if row[sec_prev_year] != 0 else (0 if row[sec_curr_year] == 0 else 100), 
             axis=1
         )
         df_chain_comp['Diff'] = df_chain_comp[sec_curr_year] - df_chain_comp[sec_prev_year]
@@ -2085,13 +2289,16 @@ if brand_col and year_col and month_col and val_col_name:
 
         # [Fix] Reset index for resizing
         df_disp_chain = df_disp_chain.reset_index(drop=True) if 'index' in df_disp_chain.columns else df_disp_chain
-        # Note: df_disp_chain might already have index reset in if/else block above, check lines 1974/1978.
-        # Line 1974: df_disp_chain = df_disp_chain.reset_index()
-        # Line 1978: df_disp_chain = ... .reset_index()
-        # So it's already reset. Just need to hide index.
+        
+        # Styling Function
+        def style_chain_growth(styler):
+            styler.format(format_dict_chain)
+            # Color YoY%: Green if > 0, Red if < 0
+            styler.applymap(lambda v: 'color: green;' if v > 0 else ('color: red;' if v < 0 else None), subset=['vs LY (%)'])
+            return styler
         
         st.dataframe(
-            df_disp_chain.style.format(format_dict_chain).apply(highlight_rows_local, axis=1).hide(axis="index"),
+            df_disp_chain.style.pipe(style_chain_growth).hide(axis="index"),
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2121,9 +2328,12 @@ if brand_col and year_col and month_col and val_col_name:
         auto_strat_idx = strat_col_opts.index(branch_col)
     
     # refine default logic if "Chain" exists
-    chain_guess = next((c for c in strat_col_opts if 'Chain' in str(c) or 'チェーン' in str(c)), None)
-    if chain_guess:
-         auto_strat_idx = strat_col_opts.index(chain_guess)
+    if "strat_col_axis" in st.session_state and st.session_state.strat_col_axis in strat_col_opts:
+        auto_strat_idx = strat_col_opts.index(st.session_state.strat_col_axis)
+    else:
+        chain_guess = next((c for c in strat_col_opts if 'Chain' in str(c) or 'チェーン' in str(c)), None)
+        if chain_guess:
+            auto_strat_idx = strat_col_opts.index(chain_guess)
          
     target_cust_col = st.selectbox(t["select_target_col"], strat_col_opts, index=auto_strat_idx, key="strat_col_axis")
     
@@ -2150,23 +2360,55 @@ if brand_col and year_col and month_col and val_col_name:
     if not metric_options:
         metric_options = num_cols
 
-    # Default to current global val_col_name
-    def_metric_idx = metric_options.index(val_col_name) if val_col_name in metric_options else 0
+    # Default to current global val_col_name or persistent session state
+    if "strat_metric_sel" in st.session_state and st.session_state.strat_metric_sel in metric_options:
+        def_metric_idx = metric_options.index(st.session_state.strat_metric_sel)
+    else:
+        def_metric_idx = metric_options.index(val_col_name) if val_col_name in metric_options else 0
+        
     strat_val_col = st.radio(t["analysis_metric_label"], metric_options, index=def_metric_idx, horizontal=True, key="strat_metric_sel")
 
     # 1. Customer Selection
     # Populate options based on selected column
-    target_customer_opts = ["(Select Customer)"]
+    avail_customers = []
     if target_cust_col:
         # Get unique values, sorted
         avail_customers = sorted(df_filtered[target_cust_col].astype(str).unique().tolist())
-        target_customer_opts += avail_customers
         
-    selected_customer_strat = st.selectbox(f"{t['customer_search_label']} ({target_cust_col})", target_customer_opts, key="strat_cust_sel", help="Type to search")
+    selected_customer_strat = []
+    if target_cust_col:
+        # Get unique values, sorted. Use global 'df' if available to prevent options disappearing on filter, otherwise df_filtered.
+        # This ensures persistence of selection even if currently filtered out by date etc.
+        source_df = df if 'df' in locals() else df_filtered
+        avail_customers = sorted(source_df[target_cust_col].astype(str).unique().tolist())
+        
+        # Check for column switch to reset selection
+        if "last_strat_col" not in st.session_state:
+             st.session_state.last_strat_col = target_cust_col
+        
+        if st.session_state.last_strat_col != target_cust_col:
+             st.session_state.strat_cust_sel = [] # Reset selection
+             st.session_state.last_strat_col = target_cust_col
+             
+        # Initialize key if missing
+        if "strat_cust_sel" not in st.session_state:
+             st.session_state.strat_cust_sel = []
 
-    if selected_customer_strat != "(Select Customer)":
+        selected_customer_strat = st.multiselect(
+            f"{t['customer_search_label']} ({target_cust_col})", 
+            options=avail_customers,
+            key="strat_cust_sel", 
+            help="Type to search (multiple allowed)"
+        )
+
+    if selected_customer_strat:
         # Filter Data for this Customer
-        df_strat = df_filtered[df_filtered[target_cust_col].astype(str) == selected_customer_strat]
+        df_strat = df_filtered[df_filtered[target_cust_col].astype(str).isin(selected_customer_strat)]
+        
+        # Helper for display name
+        cust_label_short = ", ".join(selected_customer_strat)
+        if len(cust_label_short) > 30:
+            cust_label_short = f"{len(selected_customer_strat)} Selected"
         
         if not df_strat.empty:
             
@@ -2196,239 +2438,331 @@ if brand_col and year_col and month_col and val_col_name:
             # Let's try to detect a sub-dimension.
             
             sub_dim_col = None
-            if branch_col and branch_col != target_cust_col:
-                sub_dim_col = branch_col
-            elif 'Customer Name' in df_strat.columns and target_cust_col != 'Customer Name':
-                sub_dim_col = 'Customer Name'
-            elif 'Store Name' in df_strat.columns:
-                 sub_dim_col = 'Store Name'
+            
+            # Priority: Granular Store Name > Branch
+            sub_dim_candidates = ['Customer Name', 'Store Name', 'Customer', '店舗名', '店名']
+            
+            # Find first match
+            found_store_col = None
+            for cand in sub_dim_candidates:
+                # Case insensitive check
+                match = next((c for c in df_strat.columns if str(c).lower() == cand.lower()), None)
+                if match and match != target_cust_col:
+                    found_store_col = match
+                    break
+            
+            if found_store_col:
+                sub_dim_col = found_store_col
+            elif branch_col and branch_col != target_cust_col:
+                 sub_dim_col = branch_col
             
             # Shared Definitions
             display_cols = {cur_year_sel: f"FY{cur_year_sel}", prev_year_sel: f"FY{prev_year_sel}"}
             
             def style_growth(v):
                 try:
-                    val = float(v)
-                    if val >= 100:
-                        return 'color: green; font-weight: bold;'
-                    else:
-                        return 'color: red; font-weight: bold;'
+                    val = float(str(v).replace('%',''))
+                    return 'color: green' if val > 0 else 'color: red' if val < 0 else None
                 except:
-                   return ''
-
-            tabs_yoy = st.tabs(["📂 Category Comparison", f"🏢 {selected_customer_strat} Comparison"])
+                    return None
             
-            # --- TAB 1: Category Comparison ---
-            with tabs_yoy[0]:
-                if category_col and category_col != "(なし)":
-                    st.markdown(f"**{t['category_breakdown_header']}**")
-                    # Filter for selected years
-                    df_yoy = df_strat[df_strat[year_col].isin([cur_year_sel, prev_year_sel])]
-                    
-                    # Group by Category + Year
-                    cat_perf = df_yoy.groupby([category_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
-                    
-                    # Ensure columns exist
-                    if cur_year_sel not in cat_perf.columns:
-                        cat_perf[cur_year_sel] = 0
-                    if prev_year_sel not in cat_perf.columns:
-                        cat_perf[prev_year_sel] = 0
-                        
-                    # Calculate Metrics
-                    # 1. vs LY (%)
-                    # Avoid div by zero.
-                    cat_perf['vs LY (%)'] = cat_perf.apply(lambda row: (row[cur_year_sel] / row[prev_year_sel] * 100) if row[prev_year_sel] != 0 else (0 if row[cur_year_sel] == 0 else 100), axis=1)
-                    
-                    # 2. Diff (Plug)
-                    cat_perf['Diff (Plug)'] = cat_perf[cur_year_sel] - cat_perf[prev_year_sel]
-                    
-                    # Sort by Current Year Sales desc
-                    cat_perf = cat_perf.sort_values(cur_year_sel, ascending=False)
-                    
-                    # Format
-                    if prev_year_sel == cur_year_sel:
-                        key_prev = f"FY{prev_year_sel} (Prev)"
-                        key_curr = f"FY{cur_year_sel} (Curr)"
-                        cat_perf_disp = cat_perf[[prev_year_sel, cur_year_sel, 'vs LY (%)', 'Diff (Plug)']].copy()
-                        cat_perf_disp.columns = [key_prev, key_curr, 'vs LY (%)', 'Diff (Plug)']
-                        format_dict_yoy1 = {key_prev: "{:,.0f}", key_curr: "{:,.0f}", "vs LY (%)": "{:,.1f}%", "Diff (Plug)": "{:,.0f}"}
-                    else:
-                        cat_perf_disp = cat_perf[[prev_year_sel, cur_year_sel, 'vs LY (%)', 'Diff (Plug)']].rename(columns=display_cols)
-                        format_dict_yoy1 = {
-                            f"FY{prev_year_sel}": "{:,.0f}",
-                            f"FY{cur_year_sel}": "{:,.0f}",
-                            "vs LY (%)": "{:,.1f}%",
-                            "Diff (Plug)": "{:,.0f}"
-                        }
-                    
-                    st.dataframe(
-                        cat_perf_disp.reset_index().style.format(format_dict_yoy1).map(style_growth, subset=["vs LY (%)"]).hide(axis="index"),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                else:
-                    st.info(t["warn_no_cat_col"])
+            # --- [Moved] Total Monthly Sales Summary ---
+            st.markdown(f"**{t['cust_monthly_trend_title']} {cust_label_short}**")
+            
+            # Filter for Current and Previous Year
+            df_cust_trend_base = df_strat[df_strat[year_col].isin([cur_year_sel, prev_year_sel])].copy()
+            cust_summary = None
+            month_order = []
 
-            # --- TAB 2: Branch Comparison (or Total Comparison) ---
-            with tabs_yoy[1]:
-                # Determine Grouping Column: Use sub_dim if available, else fallback to target_cust_col to show Total
-                group_col = sub_dim_col if sub_dim_col else target_cust_col
+            if not df_cust_trend_base.empty:
+                 # --- Summary Table Preparation ---
+                cust_summary = df_cust_trend_base.groupby([month_col, year_col])[val_col_name].sum().unstack(fill_value=0)
                 
-                group_name_disp = f"{t['breakdown_header']} ({group_col})" if sub_dim_col else f"{group_col} ({t['label_total']})"
+                # Ensure columns
+                if cur_year_sel not in cust_summary.columns: cust_summary[cur_year_sel] = 0
+                if prev_year_sel not in cust_summary.columns: cust_summary[prev_year_sel] = 0
                 
-                st.markdown(f"**{group_name_disp}**")
+                # Sort by MonthNum
+                if 'MonthNum' in df_filtered.columns:
+                    month_map = df_filtered[[month_col, 'MonthNum']].drop_duplicates().set_index(month_col)['MonthNum']
+                    cust_summary['MonthNum'] = cust_summary.index.map(month_map)
+                    cust_summary = cust_summary.sort_values('MonthNum').drop(columns=['MonthNum'])
+                else:
+                    # Fallback sort
+                    try:
+                        cust_summary = cust_summary.loc[sorted_months_curr] if 'sorted_months_curr' in locals() else cust_summary
+                    except:
+                        pass
+
+                # Calculate summary metrics
+                cust_summary['Diff'] = cust_summary[cur_year_sel] - cust_summary[prev_year_sel]
+                cust_summary['YoY %'] = cust_summary.apply(lambda row: (row['Diff'] / row[prev_year_sel] * 100) if row[prev_year_sel] != 0 else 0, axis=1)
                 
-                # Group by [group_col] + Year
-                df_yoy_br = df_strat[df_strat[year_col].isin([cur_year_sel, prev_year_sel])]
+                # Transpose for Display
+                cust_summary_t = cust_summary.T
                 
-                if group_col in df_yoy_br.columns:
-                    br_perf = df_yoy_br.groupby([group_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
+                # Add Total Column
+                total_c = cust_summary[cur_year_sel].sum()
+                total_p = cust_summary[prev_year_sel].sum()
+                total_d = total_c - total_p
+                total_y = (total_d / total_p * 100) if total_p != 0 else 0
+                cust_summary_t['Total'] = [total_p, total_c, total_d, total_y] 
+                
+                cust_summary_t = cust_summary_t.reindex([cur_year_sel, prev_year_sel, 'Diff', 'YoY %'])
+                cust_summary_t.index = [f"{cur_year_sel}{t['col_sales_suffix']}", f"{prev_year_sel}{t['col_sales_suffix']}", t['col_diff'], t['col_yoy']]
+                
+                # Get month order for chart
+                month_order = cust_summary.index.tolist()
+
+                # Style Function
+                def style_cust_summary(styler):
+                    styler.format("{:,.0f}", subset=pd.IndexSlice[[f"{cur_year_sel}{t['col_sales_suffix']}", f"{prev_year_sel}{t['col_sales_suffix']}", t['col_diff']], :])
+                    styler.format("{:,.1f}%", subset=pd.IndexSlice[[t['col_yoy']], :])
+                    styler.applymap(lambda v: 'color: red;' if v < 0 else 'color: blue;', subset=pd.IndexSlice[[t['col_diff'], t['col_yoy']], :])
+                    return styler
+                
+                st.markdown(f"##### {t['yoy_summary_table_title']}")
+                st.dataframe(cust_summary_t.style.pipe(style_cust_summary), use_container_width=True)
+
+            # --- Aggregation Tables ---
+            st.markdown(f"**{t['category_breakdown_header']}**")
+            
+            # 2.1 Category Performance
+            if category_col and category_col != "(なし)":
+                br_perf = df_strat.groupby([category_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
+                
+                # Ensure columns exist
+                if cur_year_sel not in br_perf.columns: br_perf[cur_year_sel] = 0
+                if prev_year_sel not in br_perf.columns: br_perf[prev_year_sel] = 0
+                
+                # Calc YoY
+                br_perf['vs LY (%)'] = br_perf.apply(lambda x: ((x[cur_year_sel] - x[prev_year_sel])/x[prev_year_sel]*100) if x[prev_year_sel]!=0 else 0, axis=1)
+                br_perf['Diff (Plug)'] = br_perf[cur_year_sel] - br_perf[prev_year_sel]
+                
+                # Sort
+                br_perf = br_perf.sort_values(cur_year_sel, ascending=False)
+                
+                # Display
+                if prev_year_sel == cur_year_sel:
+                    key_prev = f"FY{prev_year_sel} (Prev)"
+                    key_curr = f"FY{cur_year_sel} (Curr)"
+                    br_perf_disp = br_perf[[prev_year_sel, cur_year_sel, 'vs LY (%)', 'Diff (Plug)']].copy()
+                    br_perf_disp.columns = [key_prev, key_curr, 'vs LY (%)', 'Diff (Plug)']
+                    format_dict_yoy = {key_prev: "{:,.0f}", key_curr: "{:,.0f}", "vs LY (%)": "{:,.1f}%", "Diff (Plug)": "{:,.0f}"}
+                else:
+                    br_perf_disp = br_perf[[prev_year_sel, cur_year_sel, 'vs LY (%)', 'Diff (Plug)']].rename(columns=display_cols)
+                    format_dict_yoy = {
+                        f"FY{prev_year_sel}": "{:,.0f}",
+                        f"FY{cur_year_sel}": "{:,.0f}",
+                        "vs LY (%)": "{:,.1f}%",
+                        "Diff (Plug)": "{:,.0f}"
+                    }
+
+                # Add Total Row
+                br_perf_disp = br_perf_disp.reset_index()
+                # Calculate footer sums handled ? No pandas styler handles it usually or we append.
+                # Appending Total row for clarity
+                # Sum numeric cols
+                # sum_row = br_perf_disp.sum(numeric_only=True)
+                # sum_row[category_col] = 'Total'
+                # Recalc % for Total
+                # Need raw sums first
+                # tot_curr = br_perf[cur_year_sel].sum()
+                # tot_prev = br_perf[prev_year_sel].sum()
+                # tot_diff = tot_curr - tot_prev
+                # tot_yoy = (tot_diff / tot_prev * 100) if tot_prev != 0 else 0
+                
+                # Map back to display columns
+                # This is getting complex to overwrite, let's keep it simple for now as requested (just enable multiselect)
+                # Just showing table is fine.
+
+                st.dataframe(
+                    br_perf_disp.style.format(format_dict_yoy).map(style_growth, subset=["vs LY (%)"]).hide(axis="index"),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info(t["warn_no_cat_col"])
+            
+            # 2.2 Store YoY Performance (Summary)
+            if sub_dim_col:
+                st.markdown(f"**{t['store_yoy_title']} ({sub_dim_col})**")
+                
+                # Group by Store and Year
+                store_perf = df_strat.groupby([sub_dim_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
+                
+                # Check Years
+                if cur_year_sel in store_perf.columns and prev_year_sel in store_perf.columns:
+                     # Calculate Metrics
+                     store_perf['Diff'] = store_perf[cur_year_sel] - store_perf[prev_year_sel]
+                     store_perf['Growth %'] = (store_perf['Diff'] / store_perf[prev_year_sel] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+                     
+                     # Sort by Current Year Sales
+                     store_perf = store_perf.sort_values(cur_year_sel, ascending=False)
+                     
+                     # Select & Rename Columns
+                     disp_cols_s = [prev_year_sel, cur_year_sel, 'Diff', 'Growth %']
+                     store_perf_disp = store_perf[disp_cols_s].copy()
+                     store_perf_disp.columns = [f"{prev_year_sel}{t['col_sales_suffix']}", f"{cur_year_sel}{t['col_sales_suffix']}", t['col_diff'], t['col_yoy']]
+                     
+                     # Format
+                     format_dict_s = {
+                         f"{prev_year_sel}{t['col_sales_suffix']}": "{:,.0f}",
+                         f"{cur_year_sel}{t['col_sales_suffix']}": "{:,.0f}",
+                         t['col_diff']: "{:+,.0f}",
+                         t['col_yoy']: "{:+.1f}%"
+                     }
+                     
+                     st.dataframe(
+                         store_perf_disp.style.format(format_dict_s).bar(subset=[t['col_diff']], color=['#ffcccc', '#ccffcc'], align='mid').map(style_growth, subset=[t['col_yoy']]),
+                         use_container_width=True
+                     )
+                else:
+                     st.info(t["warn_year_data_missing"])
+            
+            st.divider()
+            # 2.2 Branch/Sub-dim Performance (Monthly)
+            if sub_dim_col:
+                st.markdown(f"**{t['store_monthly_title']} ({sub_dim_col} - {cur_year_sel})**")
+                group_col = sub_dim_col
+                
+                # Check if grouping is possible
+                if group_col in df_strat.columns:
+                    # Filter for Current Year only for this wide view
+                    df_sub_curr = df_strat[df_strat[year_col] == cur_year_sel]
                     
-                     # Ensure columns exist
-                    if cur_year_sel not in br_perf.columns:
-                        br_perf[cur_year_sel] = 0
-                    if prev_year_sel not in br_perf.columns:
-                        br_perf[prev_year_sel] = 0
+                    if not df_sub_curr.empty:
+                        # Pivot: Index=Store, Columns=Month, Values=Sales
+                        br_monthly = df_sub_curr.groupby([group_col, month_col])[strat_val_col].sum().unstack(fill_value=0)
                         
-                    # Calculate Metrics
-                    br_perf['vs LY (%)'] = br_perf.apply(lambda row: (row[cur_year_sel] / row[prev_year_sel] * 100) if row[prev_year_sel] != 0 else (0 if row[cur_year_sel] == 0 else 100), axis=1)
-                    br_perf['Diff (Plug)'] = br_perf[cur_year_sel] - br_perf[prev_year_sel]
-                    
-                    br_perf = br_perf.sort_values(cur_year_sel, ascending=False)
-                    
-                    # Rename Index to represent what it is (e.g. "Store Name" or "99 Ranch")
-                    # User Request: "Not Branch, but 99 Ranch etc" -> Value of selected_customer_strat
-                    br_perf.index.name = selected_customer_strat
-                    
-                    if not sub_dim_col:
-                        # Total Comparison Mode
-                        # Rename the single row to "Total" so it looks like: | 99 Ranch | ... | (Header)
-                        #                                                    | Total    | ... | (Row)
-                        br_perf.index = ["Total"]
-                    
-                    if prev_year_sel == cur_year_sel:
-                        key_prev = f"FY{prev_year_sel} (Prev)"
-                        key_curr = f"FY{cur_year_sel} (Curr)"
-                        br_perf_disp = br_perf[[prev_year_sel, cur_year_sel, 'vs LY (%)', 'Diff (Plug)']].copy()
-                        br_perf_disp.columns = [key_prev, key_curr, 'vs LY (%)', 'Diff (Plug)']
-                        format_dict_yoy2 = {key_prev: "{:,.0f}", key_curr: "{:,.0f}", "vs LY (%)": "{:,.1f}%", "Diff (Plug)": "{:,.0f}"}
+                        # Sort Columns (Months)
+                        if 'MonthNum' in df_filtered.columns:
+                            # Create a sorter based on global MonthNum
+                            month_map = df_filtered[[month_col, 'MonthNum']].drop_duplicates().sort_values('MonthNum')
+                            sorted_months = [m for m in month_map[month_col] if m in br_monthly.columns]
+                            br_monthly = br_monthly[sorted_months]
+                        else:
+                            # Fallback to existing sort list if available or alphabetical
+                            # Assuming columns are already reasonable or use standard sort
+                            pass
+
+                        # Add Total Column
+                        br_monthly['Total'] = br_monthly.sum(axis=1)
+                        
+                        # Sort Rows by Total
+                        br_monthly = br_monthly.sort_values('Total', ascending=False)
+                        
+                        # Format
+                        format_dict_br = {col: "{:,.0f}" for col in br_monthly.columns}
+                        
+                        # Reset index to show Store Name as column
+                        br_monthly_disp = br_monthly.reset_index()
+                        
+                        st.dataframe(
+                            br_monthly_disp.style.format(format_dict_br).background_gradient(cmap="Blues", subset=br_monthly.columns[:-1], axis=None),
+                            use_container_width=True,
+                            hide_index=True
+                        )
                     else:
-                        br_perf_disp = br_perf[[prev_year_sel, cur_year_sel, 'vs LY (%)', 'Diff (Plug)']].rename(columns=display_cols)
-                        format_dict_yoy2 = {
-                            f"FY{prev_year_sel}": "{:,.0f}",
-                            f"FY{cur_year_sel}": "{:,.0f}",
-                            "vs LY (%)": "{:,.1f}%",
-                            "Diff (Plug)": "{:,.0f}"
-                        }
-                    
-                    br_perf_disp = br_perf_disp.reset_index()
-                    st.dataframe(
-                        br_perf_disp.style.format(format_dict_yoy2).map(style_growth, subset=["vs LY (%)"]).hide(axis="index"),
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                        st.info(f"{cur_year_sel}{t['year_sales_suffix']} {t['no_data']}")
+
                 else:
                     st.info(f"{t['warn_no_agg_col']} ({group_col})")
+            else:
+                st.info(f"{t['warn_no_sub_dim_col']}")
             
-            c_strat1, c_strat2 = st.columns([1, 1])
+            # --- [Refactor] Full Width Layout for Better Visibility ---
             
-            with c_strat1:
-                # 2. Customer Monthly Trend
-                st.markdown(f"**{t['cust_total_trend_title']} ({strat_val_col})**")
-                df_strat_trend = df_strat.groupby(month_col)[strat_val_col].sum().reset_index()
+            # --- Chart Preparation (Full Width) ---
+            # 1. Stacked Bars (Current Year, Grouped by Category)
+            if not df_cust_trend_base.empty and cust_summary is not None:
+                df_curr_cat = df_cust_trend_base[df_cust_trend_base[year_col] == cur_year_sel]
+                # Agg check
+                curr_cat_agg = df_curr_cat.groupby([month_col, category_col])[val_col_name].sum().reset_index()
                 
-                # Sort by MonthNum if available to ensure correct order
-                if 'MonthNum' in df_filtered.columns:
-                     # Join with unique months from global or just rely on df_strat if it has MonthNum
-                     # Safer: map Month to MonthNum
-                     month_map = df_filtered[[month_col, 'MonthNum']].drop_duplicates()
-                     df_strat_trend = df_strat_trend.merge(month_map, on=month_col, how='left').sort_values('MonthNum')
+                # month_order is defined above
                 
+                fig_cust = go.Figure()
                 
-                # Bar Chart
-                fig_cust_trend = px.bar(
-                    df_strat_trend, 
-                    x=month_col, 
-                    y=strat_val_col, 
-                    title=f"{t['cust_total_trend_title']} - {selected_customer_strat} ({strat_val_col})",
+                # Add Traces for each Category
+                for cat in sorted(curr_cat_agg[category_col].unique()):
+                    cat_data = curr_cat_agg[curr_cat_agg[category_col] == cat]
+                    fig_cust.add_trace(go.Bar(
+                        x=cat_data[month_col],
+                        y=cat_data[val_col_name],
+                        name=cat,
+                        texttemplate='%{y:.2s}'
+                    ))
+                
+                # 2. Line (Previous Year Total)
+                prev_total_agg = df_cust_trend_base[df_cust_trend_base[year_col] == prev_year_sel].groupby(month_col)[val_col_name].sum().reindex(month_order).fillna(0).reset_index()
+                
+                fig_cust.add_trace(go.Scatter(
+                    x=prev_total_agg[month_col],
+                    y=prev_total_agg[val_col_name],
+                    name=f"{prev_year_sel} {t['col_sales_suffix']}",
+                    mode='lines+markers',
+                    line=dict(color='gray', width=2, dash='dash'),
+                    marker=dict(size=6, symbol='circle')
+                ))
+                
+                fig_cust.update_layout(
+                    title=f"{t['cust_monthly_trend_title']} ({cur_year_sel} vs {prev_year_sel})",
+                    barmode='stack',
+                    yaxis=dict(title=t['label_sales'], showgrid=True),
+                    xaxis=dict(categoryorder='array', categoryarray=month_order),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                     template="plotly_white",
-                    text_auto='.2s'
+                    hovermode="x unified"
                 )
-                fig_cust_trend.update_traces(marker_color='#636EFA', showlegend=False)
-                
-                # Add Trendline (Linear)
-                if len(df_strat_trend) > 1:
-                    try:
-                        # Use numeric index for x
-                        x_idx = np.arange(len(df_strat_trend))
-                        y_vals = df_strat_trend[strat_val_col].values
-                        
-                        # Linear Regression (deg=1)
-                        z = np.polyfit(x_idx, y_vals, 1)
-                        p = np.poly1d(z)
-                        
-                        fig_cust_trend.add_trace(
-                            go.Scatter(
-                                x=df_strat_trend[month_col],
-                                y=p(x_idx),
-                                mode='lines',
-                                name='Trendline',
-                                line=dict(color='red', width=2, dash='dash')
-                            )
-                        )
-                    except Exception as e:
-                        print(f"Trendline error: {e}")
-                st.plotly_chart(fig_cust_trend, use_container_width=True)
+                st.plotly_chart(fig_cust, use_container_width=True)
+            else:
+                st.info("データがありません。")
 
-            with c_strat2:
-                # 3. Product Opportunity Matrix (Bubble)
-                st.markdown(f"**{t['product_opp_matrix_header']} ({strat_val_col} vs {t['label_growth']})**")
-                # Need Current Year vs Previous Year Comparison
-                # Assuming current year is max year in data or selected context?
-                # Let's use logic: Max Year vs Max Year - 1
-                avail_years = sorted(df_strat[year_col].unique())
-                if len(avail_years) >= 2:
-                    current_year = avail_years[-1]
-                    prev_year = avail_years[-2]
-                elif len(selected_years) >= 2:
-                     # Use selection
-                     s_years_sorted = sorted([int(y) for y in selected_years])
-                     current_year = s_years_sorted[-1]
-                     prev_year = s_years_sorted[-2]
-                else:
-                    current_year = None
-                    prev_year = None
+            st.divider()
+
+            # 3. Product Opportunity Matrix (Bubble)
+            st.markdown(f"**{t['product_opp_matrix_header']} ({strat_val_col} vs {t['label_growth']})**")
+            # Need Current Year vs Previous Year Comparison
+            # Assuming current year is max year in data or selected context?
+            # Use years selected above
+            current_year = cur_year_sel
+            prev_year = prev_year_sel
+            
+            if current_year == prev_year:
+                st.warning("Product Matrix requires two different years for comparison.")
+                current_year = None # Skip rendering
+                
+            if current_year and prev_year:
+                # Filter df for years
+                df_strat_yoy = df_strat[df_strat[year_col].isin([current_year, prev_year])]
+                # Pivot
+                item_perf = df_strat_yoy.groupby([item_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
+                if current_year in item_perf.columns and prev_year in item_perf.columns:
+                    item_perf['Growth %'] = ((item_perf[current_year] - item_perf[prev_year]) / item_perf[prev_year] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+                    item_perf = item_perf.reset_index()
+                    # Filter out zero sales in current year
+                    item_perf = item_perf[item_perf[current_year] > 0]
                     
-                if current_year and prev_year:
-                    # Filter df for years
-                    df_strat_yoy = df_strat[df_strat[year_col].isin([current_year, prev_year])]
-                    # Pivot
-                    item_perf = df_strat_yoy.groupby([item_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
-                    if current_year in item_perf.columns and prev_year in item_perf.columns:
-                        item_perf['Growth %'] = ((item_perf[current_year] - item_perf[prev_year]) / item_perf[prev_year] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
-                        item_perf = item_perf.reset_index()
-                        # Filter out zero sales in current year
-                        item_perf = item_perf[item_perf[current_year] > 0]
-                        
-                        if not item_perf.empty:
-                            fig_bub = px.scatter(
-                                item_perf, 
-                                x=current_year, 
-                                y='Growth %', 
-                                size=current_year, 
-                                hover_name=item_col,
-                                color='Growth %',
-                                title=f"{t['product_opp_matrix_header']} ({selected_customer_strat})",
-                                template="plotly_white",
-                                labels={current_year: f"Current {strat_val_col}", 'Growth %': "YoY Growth (%)"}
-                            )
-                            fig_bub.add_hline(y=0, line_dash="dash", line_color="gray")
-                            st.plotly_chart(fig_bub, use_container_width=True)
-                        else:
-                            st.info(t["matrix_no_data"])
+                    if not item_perf.empty:
+                        fig_bub = px.scatter(
+                            item_perf, 
+                            x=current_year, 
+                            y='Growth %', 
+                            size=current_year, 
+                            hover_name=item_col,
+                            color='Growth %',
+                            title=f"{t['product_opp_matrix_header']} ({cust_label_short})",
+                            template="plotly_white",
+                            labels={current_year: f"Current {strat_val_col}", 'Growth %': "YoY Growth (%)"}
+                        )
+                        fig_bub.add_hline(y=0, line_dash="dash", line_color="gray")
+                        st.plotly_chart(fig_bub, use_container_width=True)
                     else:
-                        st.info(t["matrix_no_prev"])
+                        st.info(t["matrix_no_data"])
                 else:
+                    st.info(t["matrix_no_prev"])
+            else:
                     st.info(t["warn_year_data_missing"])
 
             # 4. [Moved Up] Category Monthly Trend (Requested)
@@ -2637,6 +2971,119 @@ if brand_col and year_col and month_col and val_col_name:
                 )
             else:
                 st.info(t["warn_year_data_missing"])
+                
+            # --- [NEW] Drill Down: Monthly Sales for Selected Store ---
+            if 'gd_top_n' in locals() and not gd_top_n.empty:
+                st.markdown("---")
+                st.caption("👇 Select a store to see monthly details")
+                
+                # Selection
+                gd_store_opts = gd_top_n.index.tolist()
+                selected_gd_store = st.selectbox(
+                    f"{t['select_store_monthly']} ({gd_rank_label})", 
+                    gd_store_opts, 
+                    key="gd_store_detail_sel"
+                )
+                
+                if selected_gd_store:
+                    st.markdown(f"**🗓️ {selected_gd_store} - Monthly Sales Trend ({gd_target})**")
+                    
+                    # Filter for this store
+                    df_gd_store = df_gd[df_gd[gd_loc_col] == selected_gd_store]
+                    
+                    # Pivot Table (Month x Year)
+                    gd_monthly = df_gd_store.groupby([month_col, year_col])[strat_val_col].sum().unstack(fill_value=0)
+                    
+                    # Sort Columns (Months)
+                    if 'MonthNum' in df_filtered.columns:
+                         month_map = df_filtered[[month_col, 'MonthNum']].drop_duplicates().set_index(month_col)['MonthNum']
+                         gd_monthly['MonthNum'] = gd_monthly.index.map(month_map)
+                         gd_monthly = gd_monthly.sort_values('MonthNum').drop(columns=['MonthNum'])
+                    else:
+                         pass # Fallback sort
+                         
+                    # Calculate Total
+                    gd_monthly['Total'] = gd_monthly.sum(axis=1)
+                    
+                    # Transpose: Rows = Years, Cols = Months
+                    gd_monthly_t = gd_monthly.T
+                    
+                    # Format
+                    if curr_y in gd_monthly_t.columns and prev_y in gd_monthly_t.columns:
+                        # Ensure nice order
+                        cols = sorted(gd_monthly_t.columns, reverse=True) # Descending years
+                        gd_monthly_t = gd_monthly_t[cols]
+                        
+                        # Add Diff Row (Optional but good)
+                        gd_monthly_t['Diff'] = gd_monthly_t[curr_y] - gd_monthly_t[prev_y]
+                        gd_monthly_t['YoY %'] = (gd_monthly_t['Diff'] / gd_monthly_t[prev_y] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+                        
+                        # Reorder to show rows: [Prev Year, Curr Year, Diff, YoY]
+                        # Actually transposing made Years into Columns. 
+                        # Rows are Months.
+                        # Wait, user asked for "Table". usually Years as rows is better for simple check, OR Months as columns.
+                        # Previous tables were: Rows=Stores, Cols=Months.
+                        # Here we have 1 Store. So Rows=Years, Cols=Months works best?
+                        # Or Rows=Months, Cols=Years.
+                        # Let's check "Store Monthly Breakdown" format: Rows=Store, Cols=Jan..Dec.
+                        # Since we have only 1 Store, maybe Rows=Years (2024, 2025) and Cols=Jan..Dec.
+                        
+                        gd_m_display = gd_monthly.T # Cols are Years. Rows are Months.
+                        # We want Rows to be Years.
+                        gd_m_display = gd_monthly.T # Wait, unstack gives Years as Columns.
+                        # So gd_monthly has Index=Month, Columns=Years.
+                        # gd_monthly.T has Index=Years, Columns=Months.
+                        
+                        # Add Total Column (already added to gd_monthly?)
+                        # No, gd_monthly['Total'] sum across Years. That's not what we want. We want sum across months.
+                        # Let's redo.
+                        
+                        # Pivot: Index=Year, Columns=Month
+                        gd_daily_view = df_gd_store.groupby([year_col, month_col])[strat_val_col].sum().unstack(fill_value=0)
+                         
+                        # Sort Columns (Months)
+                        if 'MonthNum' in df_filtered.columns:
+                            # Create a sorter
+                            m_map = df_filtered[[month_col, 'MonthNum']].drop_duplicates().sort_values('MonthNum')
+                            sorted_ms = [m for m in m_map[month_col] if m in gd_daily_view.columns]
+                            gd_daily_view = gd_daily_view[sorted_ms]
+                            
+                        # Add Total Column
+                        gd_daily_view['Total'] = gd_daily_view.sum(axis=1)
+                        
+                        # Add YoY Row? No, Years are rows.
+                        # We can add a Diff Row?
+                        # If we have 2024 and 2025.
+                        # diff_row = gd_daily_view.loc[curr_y] - gd_daily_view.loc[prev_y]
+                        # This works well.
+                        
+                        if curr_y in gd_daily_view.index and prev_y in gd_daily_view.index:
+                             diff_ser = gd_daily_view.loc[curr_y] - gd_daily_view.loc[prev_y]
+                             diff_ser.name = 'Diff Amount'
+                             
+                             yoy_ser = (diff_ser / gd_daily_view.loc[prev_y] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+                             yoy_ser.name = 'Growth %'
+                             
+                             gd_daily_view = pd.concat([gd_daily_view, diff_ser.to_frame().T, yoy_ser.to_frame().T])
+                        
+                        # Format
+                        def style_gd(styler):
+                             styler.format("{:,.0f}", subset=gd_daily_view.columns) # All numeric
+                             # Percentages for Growth % row
+                             styler.format("{:+.1f}%", subset=pd.IndexSlice[['Growth %'], :])
+                             return styler
+
+                        st.dataframe(
+                             gd_daily_view.style.pipe(style_gd).background_gradient(cmap="Blues", subset=pd.IndexSlice[gd_daily_view.index[:-2], gd_daily_view.columns[:-1]], axis=None),
+                             use_container_width=True
+                        )
+                    else:
+                         # Simple view if not 2 years
+                         gd_daily_view = df_gd_store.groupby([year_col, month_col])[strat_val_col].sum().unstack(fill_value=0)
+                         gd_daily_view['Total'] = gd_daily_view.sum(axis=1)
+                         st.dataframe(gd_daily_view.style.format("{:,.0f}"), use_container_width=True)
+            else:
+                 pass
         else:
              st.info(t["warn_year_data_missing"])
         
